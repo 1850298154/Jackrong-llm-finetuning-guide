@@ -1,0 +1,16 @@
+# ray job submit --runtime-env ray_demo/runtime_env.yaml 的示例文件
+# Ray 会在每个 worker 上按需安装 pip 依赖，并注入 env_vars
+# 注意：working_dir 放在命令行 --working-dir 里指定更方便；这里演示 env_vars/pip
+env_vars:
+  TRANSFORMERS_OFFLINE: "0"
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+  # 如果集群挂了共享存储，把 HF cache 指过去，避免每次重复下载模型
+  # HF_HOME: "/mnt/shared/hf-cache"
+
+# 如果 worker 镜像里已经装了需要的包，这里可以留空
+pip: []
+# 示例：追加依赖
+# pip:
+#   - "transformers==4.46.0"
+#   - "accelerate>=0.34"
+#   - "datasets"
