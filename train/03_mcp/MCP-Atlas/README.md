@@ -1,171 +1,68 @@
-# Qwen3.6-27B × MCP-Atlas GRPO (Ray Train job)
+# Qwen3.6-27B GRPO on MCP-Atlas — Ray Job
 
-A multi-GPU GRPO fine-tune of `/storage/RL/models/download/Qwen3.6-27B` on
-the MCP-Atlas tool-use dataset, packaged as a **Ray Job** that launches a
-`ray.train.torch.TorchTrainer` with one worker per GPU.
+## 运行结果 (最新)
+- **Job id**: `qwen36-27b-grpo-20260425-230652`
+- **集群**: 32 × H100 (4 节点 × 8 GPU), `PACK` 放置, NCCL
+- **模型**: `/storage/RL/models/download/Qwen3.6-27B` (`Qwen3_5ForCausalLM`, transformers 5.6.2 via runtime_env)
+- **可训练**: 79,691,776 (LoRA r=16 / α=32, 目标 q,k,v,o,gate,up,down) / 26,975,690,240 = **0.295%**
+- **Global batch**: per_device=1 × grad_accum=2 × world=32 = **64**
+- **步速**: ~76 s/step, `max_steps=3000`, 早停监控 loss 最低点
 
+### Step 进展
+```
+step 1 : loss 0.0592, reward 3.262
+step 3 : loss 0.0161, reward 3.216
+step 4 : loss -0.003, reward 3.347
+```
+
+## 目录结构
 ```
 MCP-Atlas/
-├── README.md             ← this file
-├── ray_worker.py         ← Ray Job driver: calls _run_with_ray_train()
-├── ray_submit.sh         ← `ray job submit` wrapper
-├── ray_tail.sh           ← follow status + logs for the latest submission
-├── setup_env.sh          ← one-shot bootstrap of the local venv
-├── venv/                 ← transformers 5.6.2 + trl 1.2.0 (layered)
-├── checkpoint/           ← GRPOTrainer output_dir (per-step HF checkpoints)
-├── adapter_final/        ← final LoRA adapter + tokenizer
-├── processed_data/       ← HF Dataset dump used at training time
-├── ray_results/          ← Ray Train's storage_path (trial logs & checkpoints)
-├── logs/                 ← per-rank stdout/stderr tees + submission logs
-└── ray_tmp/              ← local Ray temp dir (only used when we start Ray)
+├── ray_job/                     # Ray --working-dir, 所有节点分发此目录
+│   ├── ray_driver.py            # 驱动 Ray Train TorchTrainer (32 workers × 1 GPU)
+│   ├── Qwen3_6_27B_GRPO.py      # 训练主体 (train_code 的运行态副本)
+│   ├── runtime_env.yaml         # pip: transformers==5.6.2, huggingface_hub>=1.5,<2
+│   ├── mcp_atlas_data/          # MCP-Atlas.parquet (15 MB, 随 working_dir 分发)
+│   └── submit.sh
+├── checkpoint/                  # GRPOTrainer 检查点 (save_steps=25, keep=3)
+├── adapter_final/               # 最终 LoRA adapter
+├── processed_data/              # rank0 保存的过滤后数据集
+├── hf_cache/                    # HF_HOME, 跨节点共享
+├── logs/                        # 每 rank 日志
+├── ray_results/                 # Ray Train run metadata
+└── README.md (此文件)
 ```
 
-The trainer lives at `train_code/Qwen3.6-27B-GRPO.py`.
+训练主源码存放于 `/storage/RL/user/ytzhao02/zyt/Jackrong-llm-finetuning-guide/train_code/Qwen3.6-27B-GRPO.py`，在 `ray_job/Qwen3_6_27B_GRPO.py` 保持同步副本（文件名下划线以保证可作为 python 模块导入）。
 
----
-
-## 1. Bootstrap (once)
-
+## 提交命令
 ```bash
-cd /storage/RL/user/ytzhao02/zyt/Jackrong-llm-finetuning-guide/train/03_mcp/MCP-Atlas
-./setup_env.sh
+export RAY_ADDRESS=http://172.17.193.214:8265
+BASE=/storage/RL/user/ytzhao02/zyt/Jackrong-llm-finetuning-guide/train/03_mcp/MCP-Atlas
+STAMP=$(date +%Y%m%d-%H%M%S)
+SUB="qwen36-27b-grpo-$STAMP"
+ray job submit --submission-id "$SUB" --no-wait \
+    --working-dir "$BASE/ray_job" \
+    --runtime-env "$BASE/ray_job/runtime_env.yaml" \
+    -- python ray_driver.py
 ```
 
-`Qwen3.6-27B` ships `model_type="qwen3_5"`, which only `transformers>=5.6.2`
-knows natively; `setup_env.sh` creates a venv that layers those upgrades on
-top of the system site-packages (torch 2.10+cu129, flash_attn, ray 2.54,
-peft, accelerate all inherited).
-
-Resulting stack:
-
-| package         | version        | source   |
-|-----------------|----------------|----------|
-| transformers    | 5.6.2          | venv     |
-| trl             | 1.2.0          | venv     |
-| huggingface_hub | 1.12.0         | venv     |
-| tokenizers      | 0.22.2         | venv     |
-| safetensors     | 0.7.0          | venv     |
-| torch           | 2.10.0+cu129   | system   |
-| ray             | 2.54.0         | system   |
-| peft            | 0.18.1         | system   |
-| accelerate      | 1.11.0         | system   |
-| datasets        | 4.0.0          | system   |
-| flash_attn      | 2.8.3          | system   |
-
-## 2. Submit the Ray Job
-
+## 常用查询
 ```bash
-# Defaults: RAY_ADDRESS=http://127.0.0.1:8265, 8 workers (= all GPUs), etc.
-./ray_submit.sh
-
-# Custom submission:
-./ray_submit.sh --num_workers 8 --lora_rank 64 \
-                --per_device_train_batch_size 1 \
-                --gradient_accumulation_steps 8 \
-                --max_steps 3000
-
-# Follow progress:
-./ray_tail.sh                  # tails the latest submission
+# 状态
+ray job status $SUB
+# 实时 loss / 指标
+ray job logs $SUB 2>&1 | grep -E "loss|reward|step_time" | tail -20
+# 停止
+ray job stop  $SUB
 ```
 
-`ray_submit.sh` uses `ray job submit` against `$RAY_ADDRESS`
-(default `http://127.0.0.1:8265`).  The job's entry point is
-`ray_worker.py`, which re-execs under `venv/bin/python`, imports the
-trainer module, and calls `_run_with_ray_train(args)`.
+## 关键踩坑备忘 (已解决)
+1. **镜像 transformers 4.57 不认 `qwen3_5`** → `runtime_env.pip: transformers==5.6.2`。
+2. **transformers 5.6 `_is_package_available()` 返回 `(bool, None)` 元组**，trl 0.27 `is_<foo>_available()` 写法是 `return _is_package_available(pkg)`，使 tuple 永远为真，触发 `vllm_ascend`/`weave`/`liger_kernel`/... 等可选依赖连锁 import → 崩溃。修复：在 `_run_training()` 里 **只包装 `trl.import_utils` 的 15 个 `is_*_available()` 辅助**，取 `[0]` 强转 bool；**不要动 `transformers`**（它自己调用处都已 `[0]`）。
+3. **`'Qwen3_5ForCausalLM' has no attribute warnings_issued`**：trl 0.27 `GRPOTrainer.__init__` 里 `model.warnings_issued["estimate_tokens"] = True`，而新移植的 Qwen3_5 模型类少了这个类属性。修复：构造 trainer 前显式设置 `model.warnings_issued = {}` （含 PEFT 包装层）。
+4. **工作目录**：head pod 不挂 `/storage/RL`，所以代码 + 数据 全部打包进 `--working-dir`（15 MB parquet 直接塞进 ray_job/mcp_atlas_data/）。
+5. **ray.init("http://...")** 在 job 内部会误判为 client 地址，job 内部统一 `ray.init(address="auto")`。
 
-`_run_with_ray_train` builds:
-
-```python
-ScalingConfig(
-    num_workers=N_GPUS,
-    use_gpu=True,
-    resources_per_worker={"GPU": 1, "CPU": cpus_per_worker},
-    placement_strategy="PACK",
-)
-TorchConfig(backend="nccl")
-RunConfig(
-    name="qwen3-27b-grpo",
-    storage_path="<work_root>/ray_results",
-    checkpoint_config=CheckpointConfig(num_to_keep=3),
-)
-TorchTrainer(
-    train_loop_per_worker=_ray_train_loop,
-    train_loop_config=vars(args),
-    ...
-).fit()
-```
-
-Ray Train then spawns `N_GPUS` worker actors, each with exactly 1 GPU, sets
-`RANK / WORLD_SIZE / LOCAL_RANK / MASTER_ADDR / MASTER_PORT /
-CUDA_VISIBLE_DEVICES` for every worker, initialises the NCCL process group,
-and calls our `_ray_train_loop` in every worker.  That loop runs the
-full GRPOTrainer on the shard of the model the local rank owns.
-
-## 3. What the trainer does
-
-* **Model**: loads `Qwen3_5ForCausalLM` (or `Qwen3_5ForConditionalGeneration`
-  and drops to its `.language_model`) in bf16, enables
-  gradient-checkpointing, wraps in LoRA (default r=32 / α=64 / drop=0.05)
-  targeting `q/k/v/o/gate/up/down` projections.
-* **Data**: reads `MCP-Atlas.parquet` (500 rows), parses
-  `ENABLED_TOOLS / GTFA_CLAIMS / TRAJECTORY`, emits chat prompts asking for
-  `<think>…</think><tool_call>…</tool_call>…<final_answer>…</final_answer>`.
-  Prompts longer than `--max_prompt_length` tokens are filtered out.
-* **Rewards** (summed → GRPO advantage):
-  1. `print_samples_reward` – 0-valued monitor that prints one rank-0 sample
-     per batch.
-  2. `format_reward` – strict `<think>/<tool_call>*/<final_answer>` layout
-     with an anti-silence floor (matches the Llama-R1 notebook style).
-  3. `tool_name_reward` – fraction of `<function=…>` names that lie in
-     ENABLED_TOOLS + recall of the trajectory's gold tool names.
-  4. `claim_coverage_reward` – keyword coverage of each GTFA_CLAIM inside
-     `<final_answer>` (main learning signal).
-  5. `repetition_penalty` – tri/4-gram repetition cost, capped at −0.2.
-* **Stopping rule**: `MinLossStopCallback` tracks an EMA over `loss`,
-  records its running minimum after `--min_loss_warmup` steps, and flips
-  `TrainerControl.should_training_stop` once the EMA has risen above
-  `min * (1 + rel_tol)` for `--min_loss_patience` consecutive logging steps.
-  This implements the "stop at the parabola minimum" rule.
-* **Ray metrics**: `RayTrainReportCallback` forwards HF Trainer's `loss`,
-  `learning_rate`, `reward`, `kl`, … to `ray.train.report()` every logging
-  step, and reports a Checkpoint on every `save_steps` boundary so Ray
-  Train keeps the latest 3 rolling checkpoints.
-
-## 4. Key tunables
-
-```bash
-./ray_submit.sh \
-    --num_workers 8 \
-    --cpus_per_worker 3 \
-    --lora_rank 32 \
-    --per_device_train_batch_size 1 \
-    --gradient_accumulation_steps 8 \
-    --num_generations 4 \
-    --max_prompt_length 3072 \
-    --max_completion_length 1024 \
-    --learning_rate 5e-6 \
-    --max_steps 3000 \
-    --min_loss_warmup 40 \
-    --min_loss_patience 15
-```
-
-Pass `--no_ray` to skip Ray Train and run the trainer directly as a single
-process — useful for debugging.
-
-## 5. Sanity checks performed
-
-* Script parses and imports cleanly under the venv.
-* 500 MCP-Atlas rows build into prompts within the 3072-token cap.
-* All five rewards return sensible scores on a reference completion.
-* Ray Job is accepted by the cluster; TrainController spawns 8
-  RayTrainWorkers; Ray injects `rank=0…7, world_size=8` correctly; all
-  workers reach `torch.distributed.init_process_group`.
-
-## 6. Environment caveat we hit
-
-On the dev pod `rl-dev-ytzhao02`, Ray's dashboard reports `8 GPU / 32 CPU`
-but the container does **not** have `/dev/nvidia*` device nodes mounted,
-so `torch.cuda.is_available()` is `False` and NCCL init fails with
-`ProcessGroupNCCL is only supported with GPUs, no GPUs found!`.  On any
-correctly GPU-provisioned node the same submission drives all 8 H100s
-through the NCCL process group and begins training.
+## 早停逻辑
+`MinLossStopCallback` 基于 EMA 平滑 loss：经过 `min_loss_warmup=40` 步后，若 EMA 已连续 `min_loss_patience=15` 个 logging step 高于历史最低点，则 `control.should_training_stop = True`——"抛物线" 过了最低点即退出。不会训满 3000 步除非 loss 一直单调下降。

@@ -1,0 +1,24 @@
+# Runtime env applied to every Ray worker (driver + train workers).
+#
+# The cluster image ships transformers 4.57.6, which does NOT know
+# model_type=qwen3_5.  We layer just the two packages we need on top.
+# torch / flash_attn / ray / peft / accelerate / datasets stay on the
+# system-installed versions so flash-attention-2 keeps its prebuilt CUDA
+# kernels.
+pip:
+  - "transformers==5.6.2"
+  - "huggingface_hub>=1.5,<2"
+
+env_vars:
+  # Shared HF cache on the mounted storage volume -> avoids re-downloads.
+  HF_HOME: "/storage/RL/user/ytzhao02/zyt/Jackrong-llm-finetuning-guide/train/03_mcp/MCP-Atlas/hf_cache"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_DATASETS_OFFLINE: "1"
+  # Be quiet, fail fast on NCCL.
+  TOKENIZERS_PARALLELISM: "false"
+  NCCL_ASYNC_ERROR_HANDLING: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  # Point torchvision at a scratch dir to avoid cross-node race on .cache
+  TORCH_HOME: "/tmp/torch"
+  # Ray Train generates a per-rank log directory; good to keep things tidy.
+  RAY_STORAGE_PATH: "/storage/RL/user/ytzhao02/zyt/Jackrong-llm-finetuning-guide/train/03_mcp/MCP-Atlas/ray_results"

@@ -233,3 +233,7 @@ __marimo__/
 
 # Jupyter / editor local state
 **/.ipynb_checkpoints/
+
+# Datasets (keep out of git; use download scripts or HF hub)
+*.parquet
+*.arrow
