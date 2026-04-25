@@ -205,3 +205,31 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ===== Project-specific: training runs & artifacts =====
+# Virtual environments (any depth)
+**/venv/
+**/.venv/
+
+# Hugging Face / model caches
+**/hf_cache/
+**/.cache/huggingface/
+
+# Ray runtime outputs
+**/ray_results/
+**/ray_tmp/
+
+# Training outputs / checkpoints / adapters / processed data / logs
+**/checkpoint/
+**/checkpoints/
+**/adapter_final/
+**/processed_data/
+**/logs/
+*.ckpt
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Jupyter / editor local state
+**/.ipynb_checkpoints/
